@@ -6,37 +6,49 @@ Output: 60-s windowed 5-D features + 3-class labels
 """
 
 import os, json, numpy as np, pandas as pd
-from sklearn.preprocessing import MinMaxScaler
 
 RAW_FILES = [f'raw dataset/TS{i}.csv' for i in range(1,6)]
-TRAIN_FILES = RAW_FILES[:2]
-VAL_FILES   = RAW_FILES[2:3]
-TEST_FILES  = RAW_FILES[3:5]
+# Exclude TS4 (outlier with 99% humidity) and use remaining files
+VALID_FILES = [f for f in RAW_FILES if f != 'raw dataset/TS4.csv']  # TS1, TS2, TS3, TS5
 
-WINDOW = 60
+TRAIN_FILES = VALID_FILES[:2]  # TS1, TS2
+VAL_FILES   = VALID_FILES[2:3]  # TS3
+TEST_FILES  = VALID_FILES[3:4]  # TS5
+
 LABEL_MAP = {'excellent':0, 'good':1, 'acceptable':1, 'spoiled':2}
 FEAT_COLS = ['MQ135','Temperature','Humidity']
 OUT_DIR = 'refined'
 os.makedirs(OUT_DIR, exist_ok=True)
 
 def build_features(df):
+    WINDOW = 60
     feats, labs = [], []
-    r = df['MQ135'].rolling(window=WINDOW)
-    r_min, r_max = r.min(), r.max()
     for i in range(WINDOW, len(df)):
+        # Get the current window
+        window_data = df['MQ135'].iloc[i-WINDOW:i+1]
         R_now = df['MQ135'].iloc[i]
         R_prev= df['MQ135'].iloc[i-1]
         T_now = df['Temperature'].iloc[i]
         H_now = df['Humidity'].iloc[i]
         minute= df['minute'].iloc[i]
 
-        R_norm = (R_now - r_min.iloc[i]) / (r_max.iloc[i] - r_min.iloc[i] + 1e-3)
+        # Normalize R_norm within the current window
+        R_min = window_data.min()
+        R_max = window_data.max()
+        R_norm = (R_now - R_min) / (R_max - R_min + 1e-3)
+        
         dR_dt  = (R_now - R_prev) / 60.
+        # Normalize dR_dt to reasonable range (assuming max change of 1 ohm per second)
+        dR_dt_norm = dR_dt / 1.0  # Scale to [-1, 1] approximately
+        
         T_comp = max(T_now - 4.0, 0)
+        # Normalize T_comp (assuming fridge temperatures 4-40°C, so T_comp 0-36°C)
+        T_comp_norm = T_comp / 40.0  # Scale to [0, 0.9] approximately
+        
         H_norm = H_now / 100.
         hour   = (minute % 1440) / 1440.
 
-        feats.append([R_norm, dR_dt, T_comp, H_norm, hour])
+        feats.append([R_norm, dR_dt_norm, T_comp_norm, H_norm, hour])
         labs.append(LABEL_MAP[df['class'].iloc[i]])
     return np.array(feats), np.array(labs)
 
@@ -54,11 +66,6 @@ def main():
     X_val,   y_val   = load_set(VAL_FILES)
     X_test,  y_test  = load_set(TEST_FILES)
 
-    scaler = MinMaxScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_val   = scaler.transform(X_val)
-    X_test  = scaler.transform(X_test)
-
     np.save(os.path.join(OUT_DIR,'X_train.npy'), X_train)
     np.save(os.path.join(OUT_DIR,'y_train.npy'), y_train)
     np.save(os.path.join(OUT_DIR,'X_val.npy'),   X_val)
@@ -68,9 +75,6 @@ def main():
 
     json.dump({' Fresh':0,'Spoiling':1,'Spoiled':2},
               open(os.path.join(OUT_DIR,'label_map.json'),'w'), indent=2)
-    json.dump({'scale_':scaler.scale_.tolist(),
-               'min_':  scaler.min_.tolist()},
-              open(os.path.join(OUT_DIR,'scaler.json'),'w'), indent=2)
 
     with open(os.path.join(OUT_DIR,'stats.txt'),'w') as f:
         for name, yy in zip(('Train','Val','Test'),(y_train,y_val,y_test)):
