@@ -5,26 +5,48 @@ Runs on Raspberry Pi Zero 2W with MQ-135 + DHT22 sensors
 Uses TensorFlow Lite INT8 quantized model for edge AI
 """
 
+import sys
 import time
-import numpy as np
-import board
-import busio
-import digitalio
-import adafruit_mcp3xxx.mcp3008 as MCP
-from adafruit_mcp3xxx.analog_in import AnalogIn
-import adafruit_dht
-import tflite_runtime.interpreter as tflite
 
-# Sensor Configuration
-MQ135_CHANNEL = MCP.P0  # MQ-135 connected to CH0
-DHT_PIN = board.D4      # DHT22 connected to GPIO4
+# import adafruit_dht  # Moved to function
+# import adafruit_mcp3xxx.mcp3008 as MCP  # Moved to function
+# import board  # Moved to function
+# import busio  # Moved to function
+# import digitalio  # Moved to function
+import numpy as np
+
+# import tflite_runtime.interpreter as tflite  # Moved to function
+# from adafruit_mcp3xxx.analog_in import AnalogIn  # Moved to function
+
+# Simulation mode for testing without hardware
+SIMULATION_MODE = "--simulate" in sys.argv
 
 # Model Configuration
-MODEL_PATH = 'food_spoilage_int8.tflite'
-CLASS_NAMES = ['Fresh', 'Spoiling', 'Spoiled']
+MODEL_PATH = "food_spoilage_int8.tflite"
+CLASS_NAMES = ["Fresh", "Spoiling", "Spoiled"]
+
+# Timing Configuration (change these values to adjust timing)
+COLLECTION_DURATION = 5  # seconds to collect sensor data
+WAIT_DURATION = 5  # seconds to wait between checks
+
 
 def initialize_sensors():
     """Initialize MQ-135 and DHT22 sensors"""
+    if SIMULATION_MODE:
+        print("Running in simulation mode - no sensors needed!")
+        return None, None
+
+    import adafruit_dht
+    import adafruit_mcp3xxx.mcp3008 as MCP
+    import board
+    import busio
+    import digitalio
+    from adafruit_mcp3xxx.analog_in import AnalogIn
+
+    # Sensor Configuration
+    MQ135_CHANNEL = MCP.P0  # MQ-135 connected to CH0
+    DHT_PIN = board.D4  # DHT22 connected to GPIO4
+
     print("Initializing sensors...")
 
     # SPI for MCP3008 (MQ-135)
@@ -39,7 +61,10 @@ def initialize_sensors():
     print("Sensors initialized successfully!")
     return mq135, dht
 
-def collect_sensor_data(mq135, dht, duration=60):
+
+def collect_sensor_data(
+    mq135, dht, duration=COLLECTION_DURATION
+):  # Changed to 5 seconds
     """Collect sensor readings over specified duration (seconds)"""
     print(f"Collecting sensor data for {duration} seconds...")
 
@@ -48,25 +73,37 @@ def collect_sensor_data(mq135, dht, duration=60):
 
     while time.time() - start_time < duration:
         try:
-            # Read MQ-135 (resistance in ohms)
-            mq135_value = mq135.value  # Raw ADC value (0-65535)
-            # Convert to resistance (assuming voltage divider with 10k resistor)
-            # This is approximate - calibrate for your setup
-            mq135_resistance = (mq135_value / 65535) * 10000  # Rough conversion
+            if SIMULATION_MODE:
+                # Simulate sensor readings for normal environment
+                mq135_resistance = 10000 + np.random.normal(
+                    0, 500
+                )  # Around 10k ohms with some variation
+                temperature = 25 + np.random.normal(
+                    0, 2
+                )  # Room temperature around 25°C
+                humidity = 50 + np.random.normal(0, 5)  # Room humidity around 50%
+            else:
+                # Read MQ-135 (resistance in ohms)
+                mq135_value = mq135.value  # Raw ADC value (0-65535)
+                # Convert to resistance (assuming voltage divider with 10k resistor)
+                # This is approximate - calibrate for your setup
+                mq135_resistance = (mq135_value / 65535) * 10000  # Rough conversion
 
-            # Read DHT22
-            temperature = dht.temperature
-            humidity = dht.humidity
+                # Read DHT22
+                temperature = dht.temperature
+                humidity = dht.humidity
 
             # Get timestamp
             minute = time.time() / 60  # Convert to minutes since epoch
 
-            readings.append({
-                'mq135': mq135_resistance,
-                'temperature': temperature,
-                'humidity': humidity,
-                'minute': minute
-            })
+            readings.append(
+                {
+                    "mq135": mq135_resistance,
+                    "temperature": temperature,
+                    "humidity": humidity,
+                    "minute": minute,
+                }
+            )
 
             time.sleep(1)  # 1 reading per second
 
@@ -78,23 +115,24 @@ def collect_sensor_data(mq135, dht, duration=60):
     print(f"Collected {len(readings)} readings")
     return readings
 
+
 def extract_features(readings):
     """Extract 5D feature vector from sensor readings"""
     if len(readings) < 2:
         raise ValueError("Need at least 2 readings for feature extraction")
 
     # Convert to DataFrame-like structure
-    mq135_values = [r['mq135'] for r in readings]
-    temp_values = [r['temperature'] for r in readings]
-    hum_values = [r['humidity'] for r in readings]
-    minutes = [r['minute'] for r in readings]
+    mq135_values = [r["mq135"] for r in readings]
+    temp_values = [r["temperature"] for r in readings]
+    hum_values = [r["humidity"] for r in readings]
+    minutes = [r["minute"] for r in readings]
 
     # Use the last reading for features (simplified - in production use sliding window)
     i = len(readings) - 1
-    window_data = mq135_values[max(0, i-60):i+1]  # Last 60 readings or available
+    window_data = mq135_values[max(0, i - 60) : i + 1]  # Last 60 readings or available
 
     R_now = mq135_values[i]
-    R_prev = mq135_values[i-1] if i > 0 else R_now
+    R_prev = mq135_values[i - 1] if i > 0 else R_now
     T_now = temp_values[i]
     H_now = hum_values[i]
     minute = minutes[i]
@@ -109,7 +147,7 @@ def extract_features(readings):
     dR_dt_norm = dR_dt / 1.0  # Scale to reasonable range
 
     # Feature 3: T_comp (temperature compensation)
-    T_comp = max(T_now - 4.0, 0)  # Above fridge baseline
+    T_comp = max(T_now - 20.0, 0)  # Above room temperature baseline
     T_comp_norm = T_comp / 40.0  # Normalize
 
     # Feature 4: H_norm (humidity normalized)
@@ -118,11 +156,20 @@ def extract_features(readings):
     # Feature 5: Hour (time-of-day factor)
     hour = (minute % 1440) / 1440.0  # Fraction of day
 
-    features = np.array([[R_norm, dR_dt_norm, T_comp_norm, H_norm, hour]], dtype=np.float32)
+    features = np.array(
+        [[R_norm, dR_dt_norm, T_comp_norm, H_norm, hour]], dtype=np.float32
+    )
     return features
+
 
 def load_model():
     """Load TensorFlow Lite model"""
+    if SIMULATION_MODE:
+        print("Skipping model load in simulation mode")
+        return None, None, None
+
+    import tflite_runtime.interpreter as tflite
+
     print("Loading TFLite model...")
     interpreter = tflite.Interpreter(model_path=MODEL_PATH)
     interpreter.allocate_tensors()
@@ -133,11 +180,19 @@ def load_model():
     print("Model loaded successfully!")
     return interpreter, input_details, output_details
 
+
 def run_inference(interpreter, input_details, output_details, features):
     """Run model inference"""
+    if SIMULATION_MODE:
+        # Simulate inference result
+        output = np.random.rand(1, 3)  # Random probabilities for 3 classes
+        output = output / output.sum()  # Normalize to sum to 1
+        inference_time = np.random.uniform(5, 15)  # Random inference time
+        return output, inference_time
+
     # Quantize input for INT8 model
-    input_scale = input_details[0]['quantization'][0]
-    input_zero_point = input_details[0]['quantization'][1]
+    input_scale = input_details[0]["quantization"][0]
+    input_zero_point = input_details[0]["quantization"][1]
 
     if input_scale != 0:  # Check if quantization is enabled
         input_quant = (features / input_scale + input_zero_point).astype(np.uint8)
@@ -145,7 +200,7 @@ def run_inference(interpreter, input_details, output_details, features):
         input_quant = features.astype(np.float32)
 
     # Set input tensor
-    interpreter.set_tensor(input_details[0]['index'], input_quant)
+    interpreter.set_tensor(input_details[0]["index"], input_quant)
 
     # Run inference
     start_time = time.time()
@@ -153,11 +208,11 @@ def run_inference(interpreter, input_details, output_details, features):
     inference_time = (time.time() - start_time) * 1000  # ms
 
     # Get output
-    output_quant = interpreter.get_tensor(output_details[0]['index'])
+    output_quant = interpreter.get_tensor(output_details[0]["index"])
 
     # Dequantize output
-    output_scale = output_details[0]['quantization'][0]
-    output_zero_point = output_details[0]['quantization'][1]
+    output_scale = output_details[0]["quantization"][0]
+    output_zero_point = output_details[0]["quantization"][1]
 
     if output_scale != 0:
         output = (output_quant.astype(np.float32) - output_zero_point) * output_scale
@@ -165,6 +220,7 @@ def run_inference(interpreter, input_details, output_details, features):
         output = output_quant.astype(np.float32)
 
     return output, inference_time
+
 
 def main():
     """Main detection loop"""
@@ -182,8 +238,8 @@ def main():
         print("Press Ctrl+C to stop\n")
 
         while True:
-            # Collect 60 seconds of data
-            readings = collect_sensor_data(mq135, dht, duration=60)
+            # Collect 5 seconds of data
+            readings = collect_sensor_data(mq135, dht, duration=COLLECTION_DURATION)
 
             if len(readings) < 2:
                 print("Insufficient data, skipping...")
@@ -193,7 +249,9 @@ def main():
             features = extract_features(readings)
 
             # Run inference
-            output, inference_time = run_inference(interpreter, input_details, output_details, features)
+            output, inference_time = run_inference(
+                interpreter, input_details, output_details, features
+            )
 
             # Get prediction
             predicted_class = np.argmax(output[0])
@@ -205,28 +263,30 @@ def main():
             print("FOOD SPOILAGE DETECTION RESULT")
             print("=" * 50)
             print(f"Prediction: {prediction}")
-            print(".2f")
-            print(".2f")
+            print(f"Confidence: {confidence:.2f}")
+            print(f"Inference time: {inference_time:.2f} ms")
             print(f"Raw outputs: {output[0]}")
             print("=" * 50)
 
             # Status indicators (you can connect LEDs here)
-            if prediction == 'Fresh':
+            if prediction == "Fresh":
                 print("🟢 STATUS: Food is FRESH - Safe to eat!")
-            elif prediction == 'Spoiling':
+            elif prediction == "Spoiling":
                 print("🟡 STATUS: Food is SPOILING - Use soon!")
             else:
                 print("🔴 STATUS: Food is SPOILED - Discard immediately!")
 
-            print("\nWaiting 60 seconds before next check...\n")
-            time.sleep(60)
+            print(f"\nWaiting {WAIT_DURATION} seconds before next check...\n")
+            time.sleep(WAIT_DURATION)
 
     except KeyboardInterrupt:
         print("\nStopping detector...")
     except Exception as e:
         print(f"Error: {e}")
         import traceback
+
         traceback.print_exc()
+
 
 if __name__ == "__main__":
     main()
